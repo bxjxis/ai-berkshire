@@ -179,6 +179,8 @@ def cmd_quote(code: str):
     print(f"  PE(动):     {d['pe']}")
     print(f"  PB:         {d['pb']}")
     print(f"  换手率:     {d['turnover_rate']}%")
+    print(f"  涨停价:     {d['limit_up']}")
+    print(f"  跌停价:     {d['limit_down']}")
     high_52w, low_52w = _fetch_52w(code)
     print(f"  52周最高:   {high_52w}")
     print(f"  52周最低:   {low_52w}")
