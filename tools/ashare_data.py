@@ -26,7 +26,7 @@ _TIMEOUT = 15
 def _curl(url):
     """用 curl --noproxy 直连，绕过系统代理。"""
     result = subprocess.run(
-        ["/usr/bin/curl", "-s", "--noproxy", "*",
+        ["curl", "-s", "--noproxy", "*",
          "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
          url],
         capture_output=True, timeout=_TIMEOUT,
@@ -327,6 +327,77 @@ def cmd_search(keyword: str):
 
 
 # ---------------------------------------------------------------------------
+def _resample(daily, period):
+    """日线聚合为周/月线。daily 已按时间升序。"""
+    if period == "day":
+        return daily
+    key = (lambda d: d.isocalendar()[:2]) if period == "week" else (lambda d: (d.year, d.month))
+    from datetime import date
+    out, bucket, cur = [], [], None
+    for r in daily:
+        k = key(date.fromisoformat(r[0]))
+        if cur is not None and k != cur:
+            out.append(_agg(bucket)); bucket = []
+        bucket, cur = bucket + [r], k
+    if bucket:
+        out.append(_agg(bucket))
+    return out
+
+
+def _agg(bucket):
+    """一组日线 -> 单根 [日期(末), 开(首), 收(末), 高(max), 低(min)]。"""
+    return [bucket[-1][0], bucket[0][1], bucket[-1][2],
+            f"{max(float(r[3]) for r in bucket)}", f"{min(float(r[4]) for r in bucket)}"]
+
+
+def cmd_kline(code: str, period: str = "week", count: int = 60):
+    """K线数据（前复权）。新浪日线聚合，周期 week/month/day。"""
+    qq = _qq_code(code)
+    span = {"week": 5, "month": 22, "day": 1}[period]
+    datalen = count * span + 10
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           f"CN_MarketData.getKLineData?symbol={qq}&scale=240&ma=no&datalen={datalen}")
+    raw = _curl_json(url)
+    if not raw:
+        raise ConnectionError(f"无K线数据: {code}")
+    # 新浪字段: day/open/high/low/close/volume -> 统一为 [日期,开,收,高,低]
+    daily = [[d["day"][:10], d["open"], d["close"], d["high"], d["low"]] for d in raw]
+    rows = _resample(daily, period)[-count:]
+    closes = [float(r[2]) for r in rows]
+
+    def ma(n):
+        return sum(closes[-n:]) / n if len(closes) >= n else None
+
+    last = rows[-1]
+    hi = max(float(r[3]) for r in rows)
+    lo = min(float(r[4]) for r in rows)
+    period_cn = {"week": "周", "month": "月", "day": "日"}.get(period, period)
+
+    print("=" * 60)
+    print(f"  {period_cn}K线: {code}  (前复权, 近{len(rows)}根)")
+    print("=" * 60)
+    print(f"  最新 {last[0]}: 开{last[1]} 收{last[2]} 高{last[3]} 低{last[4]}")
+    print(f"  区间高/低: {hi:.2f} / {lo:.2f}")
+    print(f"  MA5={_r(ma(5))}  MA10={_r(ma(10))}  MA20={_r(ma(20))}  MA30={_r(ma(30))}")
+    price = closes[-1]
+    for n in (5, 10, 20, 30):
+        m = ma(n)
+        if m:
+            print(f"  距MA{n}: {(price / m - 1) * 100:+.1f}%")
+    print("-" * 60)
+    print("  最近12根:")
+    print(f"  {'日期':<12}{'开':>8}{'收':>8}{'高':>8}{'低':>8}{'涨跌%':>8}")
+    for r in rows[-12:]:
+        o, c = float(r[1]), float(r[2])
+        pct = (c / o - 1) * 100
+        print(f"  {r[0]:<12}{o:>8.2f}{c:>8.2f}{float(r[3]):>8.2f}{float(r[4]):>8.2f}{pct:>+8.1f}")
+
+
+def _r(v):
+    return f"{v:.2f}" if v is not None else "-"
+
+
+# ---------------------------------------------------------------------------
 # CLI 入口
 # ---------------------------------------------------------------------------
 
@@ -349,6 +420,11 @@ def main():
     p_search = sub.add_parser("search", help="搜索股票代码")
     p_search.add_argument("keyword", help="公司名或关键词")
 
+    p_kline = sub.add_parser("kline", help="K线数据（前复权）")
+    p_kline.add_argument("code", help="股票代码")
+    p_kline.add_argument("--period", default="week", choices=["day", "week", "month"])
+    p_kline.add_argument("--count", type=int, default=60, help="根数，默认60")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -360,6 +436,7 @@ def main():
         "financials": lambda: cmd_financials(args.code),
         "valuation": lambda: cmd_valuation(args.code),
         "search": lambda: cmd_search(args.keyword),
+        "kline": lambda: cmd_kline(args.code, args.period, args.count),
     }
     cmds[args.command]()
 
